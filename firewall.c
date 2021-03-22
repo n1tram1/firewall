@@ -15,6 +15,8 @@
 
 #include "bpf_insn.h"
 
+#include "bpf_program.h"
+
 #define DEBUGFS "/sys/kernel/debug/tracing/"
 
 #define array_len(ARR) (sizeof(ARR) / sizeof(*(ARR)))
@@ -106,6 +108,35 @@ static int parse_argv(char **argv, struct options *opts)
 	return 0;
 }
 
+static int add_socket_block_instructions(struct bpf_program *prog,
+					 uint32_t source, uint16_t sport,
+					 uint32_t destination, uint16_t dport)
+{
+	struct bpf_insn instructions[] = {
+		// build the fmt "slt" in [r1]
+		BPF_MOV64_REG(BPF_REG_1, BPF_REG_10),
+		BPF_ALU64_IMM(BPF_ADD, BPF_REG_1, -8),
+
+		BPF_ST_MEM(32, BPF_REG_10, -8, 0x00746c73),
+		BPF_ST_MEM(32, BPF_REG_10, -4, 0x00000000),
+
+		// set fmt_len in r2
+		BPF_MOV64_IMM(BPF_REG_2, 4),
+		//
+		BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0,
+			     BPF_FUNC_trace_printk),
+
+		BPF_MOV64_IMM(BPF_REG_0, 0),
+		BPF_EXIT_INSN(),
+	};
+
+	if (bpf_program_add_instructions(prog, instructions,
+					 array_len(instructions)) < 0)
+		return -1;
+
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	struct options opts;
@@ -123,9 +154,9 @@ int main(int argc, char **argv)
 
 	switch (opts.action) {
 	case BLOCK:
-		if (bpf_program_add_socket_block_instructions(
-			    prog, opts.source, opts.sport, opts.destination,
-			    opts.dport) < 0)
+		if (add_socket_block_instructions(prog, opts.source, opts.sport,
+						  opts.destination,
+						  opts.dport) < 0)
 			err(EXIT_FAILURE, "failed to build block instructions");
 	case ACCEPT:
 		// By default the socket is already accepted

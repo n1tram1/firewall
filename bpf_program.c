@@ -1,6 +1,7 @@
 #include "bpf_program.h"
 
 #include <stdlib.h>
+#include <string.h>
 
 struct bpf_program *bpf_program_new(void)
 {
@@ -23,12 +24,12 @@ int bpf_program_add_instructions(struct bpf_program *prog,
 				 const struct bpf_insn *insns, size_t cnt)
 {
 	prog->instructions =
-		reallocarray(prog->instructions, prog->instructions + cnt,
+		reallocarray(prog->instructions, prog->instructions_cnt + cnt,
 			     sizeof(*prog->instructions));
 	if (!prog->instructions)
 		return -1;
 
-	memcpy(prog->instructions + prog->instructions, insns, cnt);
+	memcpy(prog->instructions + prog->instructions_cnt, insns, cnt);
 
 	prog->instructions_cnt += cnt;
 

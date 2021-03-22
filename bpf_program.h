@@ -1,10 +1,13 @@
 #ifndef BPF_PROGRAM_H
 #define BPF_PROGRAM_H
 
+#include <linux/bpf.h>
 #include "bpf_insn.h"
 
+#include <stdlib.h>
+
 struct bpf_program {
-	struct bpf_insn instructions;
+	struct bpf_insn *instructions;
 	size_t instructions_cnt;
 };
 
