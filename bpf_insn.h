@@ -3,7 +3,7 @@
 #ifndef __BPF_INSN_H
 #define __BPF_INSN_H
 
-struct bpf_insn;
+#include <linux/bpf.h>
 
 /* ALU ops on registers, bpf_add|sub|...: dst_reg += src_reg */
 

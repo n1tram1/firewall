@@ -10,32 +10,14 @@
 #include <sys/ioctl.h>
 #include <fcntl.h>
 #include <asm/unistd.h>
-#include <linux/perf_event.h>
 #include <linux/bpf.h>
 
 #include "bpf_insn.h"
 
 #include "bpf_program.h"
+#include "utils.h"
 
 #define DEBUGFS "/sys/kernel/debug/tracing/"
-
-#define array_len(ARR) (sizeof(ARR) / sizeof(*(ARR)))
-#define ptr_to_u64(ptr) ((__u64)(unsigned long)(ptr))
-
-static long perf_event_open(struct perf_event_attr *hw_event, pid_t pid,
-			    int cpu, int group_fd, unsigned long flags)
-{
-	int ret;
-
-	ret = syscall(__NR_perf_event_open, hw_event, pid, cpu, group_fd,
-		      flags);
-	return ret;
-}
-
-int bpf(enum bpf_cmd cmd, union bpf_attr *attr, unsigned int size)
-{
-	return syscall(__NR_bpf, cmd, attr, size);
-}
 
 void read_trace_pipe(void)
 {
@@ -150,7 +132,7 @@ int main(int argc, char **argv)
 	if (parse_argv(argv, &opts) < 0)
 		exit(EXIT_FAILURE);
 
-	prog = bpf_program_new();
+	prog = bpf_program_new(BPF_PROG_TYPE_CGROUP_SKB);
 
 	switch (opts.action) {
 	case BLOCK:
@@ -158,11 +140,18 @@ int main(int argc, char **argv)
 						  opts.destination,
 						  opts.dport) < 0)
 			err(EXIT_FAILURE, "failed to build block instructions");
+		break;
 	case ACCEPT:
 		// By default the socket is already accepted
 		// do nothing...
 		errx(EXIT_SUCCESS, "accepting the socket");
 	};
+
+	if (bpf_program_load(prog) < 0)
+		errx(EXIT_FAILURE, "bpf_program_load");
+
+	if (bpf_program_cgroup_attach(prog, BPF_CGROUP_INET_INGRESS, "/", 0) < 0)
+		errx(EXIT_FAILURE, "bpf_program_cgroup_attach");
 
 	struct bpf_insn instructions[] = {
 		// get the comm
