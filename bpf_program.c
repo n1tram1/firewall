@@ -8,6 +8,7 @@
 #include <sys/types.h>
 #include <err.h>
 
+#include "syscalls.h"
 #include "utils.h"
 
 struct bpf_program *bpf_program_new(uint32_t prog_type)
@@ -24,7 +25,7 @@ struct bpf_program *bpf_program_new(uint32_t prog_type)
 	return prog;
 }
 
-void bpf_program_del(struct bpf_program *prog)
+void bpf_program_destroy(struct bpf_program *prog)
 {
 	free(prog->instructions);
 	free(prog);
@@ -78,8 +79,10 @@ int bpf_program_cgroup_attach(struct bpf_program *prog, int type, const char *pa
 	int fd;
 
 	fd = open(path, O_DIRECTORY | O_RDONLY | O_CLOEXEC);
-	if (fd < 0)
+	if (fd < 0) {
+		warn("open(cgroup_path: %s)", path);
 		return -1;
+	}
 
 	memset(&attr, 0, sizeof(attr));
 
@@ -90,6 +93,36 @@ int bpf_program_cgroup_attach(struct bpf_program *prog, int type, const char *pa
 
 	if (bpf(BPF_PROG_ATTACH, &attr, sizeof(attr)) < 0) {
 		warn("bpf(BPF_PROG_ATTACH...");
+		return -1;
+	}
+
+	prog->attached_path = strdup(path);
+	prog->attached_type = type;
+
+	close(fd);
+
+	return 0;
+}
+
+int bpf_program_cgroup_detach(struct bpf_program *prog)
+{
+	int cgroup_fd;
+	union bpf_attr attr;
+
+	cgroup_fd = open(prog->attached_path, O_DIRECTORY | O_RDONLY | O_CLOEXEC);
+	if (cgroup_fd < 0) {
+		warn("open(attached_path: %s)", prog->attached_path);
+		return -1;
+	}
+
+
+	memset(&attr, 0, sizeof(attr));
+	attr.attach_type = prog->attached_type;
+	attr.target_fd = cgroup_fd;
+	attr.attach_bpf_fd = prog->fd;
+
+	if (bpf(BPF_PROG_DETACH, &attr, sizeof(attr)) < 0) {
+		warn("bpf(BPF_PROG_DETACH...)");
 		return -1;
 	}
 

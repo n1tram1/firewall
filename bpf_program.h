@@ -12,15 +12,19 @@ struct bpf_program {
     uint32_t type; // BPF program type
 
     int fd;
+
+    char *attached_path;
+    uint32_t attached_type;
 };
 
 struct bpf_program *bpf_program_new(uint32_t prog_type);
-void bpf_program_del(struct bpf_program *prog);
+void bpf_program_destroy(struct bpf_program *prog);
 
 int bpf_program_add_instructions(struct bpf_program *prog,
 				 const struct bpf_insn *insns, size_t cnt);
 
 int bpf_program_load(struct bpf_program *prog);
 int bpf_program_cgroup_attach(struct bpf_program *prog, int type, const char *path, uint32_t flags);
+int bpf_program_cgroup_detach(struct bpf_program *prog);
 
 #endif /* ! BPF_PROGRAM_H */

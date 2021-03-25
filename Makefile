@@ -1,8 +1,11 @@
-CFLAGS = -Wall -Wextra -std=gnu89 -O0 -g
+CC = gcc
+CPPFLAGS = -D_DEFAULT_SOURCE
+CFLAGS = -Wall -Wextra -std=c99 -O0 -g
 
 OBJS = firewall.o \
-       bpf_program.o
+       bpf_program.o \
        syscalls.o
+
 
 firewall: $(OBJS)
 

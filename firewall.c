@@ -5,12 +5,16 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <sys/types.h>
 #include <sys/ioctl.h>
+#include <endian.h>
 #include <fcntl.h>
 #include <asm/unistd.h>
 #include <linux/bpf.h>
+#include <stdbool.h>
+#include <signal.h>
 
 #include "bpf_insn.h"
 
@@ -27,17 +31,27 @@ void read_trace_pipe(void)
 	if (trace_fd < 0)
 		return;
 
-	while (1) {
-		static char buf[4096];
-		ssize_t sz;
+	static char buf[4096];
+	ssize_t sz;
 
-		sz = read(trace_fd, buf, sizeof(buf) - 1);
-		if (sz > 0) {
-			buf[sz] = 0;
-			puts(buf);
-		}
+	sz = read(trace_fd, buf, sizeof(buf) - 1);
+	if (sz > 0) {
+		buf[sz] = 0;
+		puts(buf);
 	}
+
+	close(trace_fd);
 }
+
+volatile sig_atomic_t stop = false;
+
+static void sigint_handler(int signum)
+{
+	(void)signum;
+
+	stop = true;
+}
+
 
 struct options {
 	enum {
@@ -95,22 +109,34 @@ static int add_socket_block_instructions(struct bpf_program *prog,
 					 uint32_t destination, uint16_t dport)
 {
 	struct bpf_insn instructions[] = {
-		// build the fmt "slt" in [r1]
 		BPF_MOV64_REG(BPF_REG_1, BPF_REG_10),
 		BPF_ALU64_IMM(BPF_ADD, BPF_REG_1, -8),
-
-		BPF_ST_MEM(32, BPF_REG_10, -8, 0x00746c73),
-		BPF_ST_MEM(32, BPF_REG_10, -4, 0x00000000),
-
-		// set fmt_len in r2
+		BPF_ST_MEM(BPF_W, BPF_REG_1, 0, 0x000A7825),
 		BPF_MOV64_IMM(BPF_REG_2, 4),
-		//
-		BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0,
-			     BPF_FUNC_trace_printk),
+		BPF_MOV64_IMM(BPF_REG_3, (uint32_t) (htobe16(dport) << 16)),
+		BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0, BPF_FUNC_trace_printk),
 
-		BPF_MOV64_IMM(BPF_REG_0, 0),
-		BPF_EXIT_INSN(),
+		BPF_MOV64_IMM(BPF_REG_0, SK_PASS),
+
+		BPF_JMP_IMM(BPF_JNE, BPF_REG_6, source, 0),
+		BPF_JMP_IMM(BPF_JNE, BPF_REG_7, sport, 0),
+		BPF_JMP_IMM(BPF_JNE, BPF_REG_8, destination, 0),
+		BPF_JMP_IMM(BPF_JNE, BPF_REG_9, htobe32(dport), 0),
+
+		BPF_MOV64_IMM(BPF_REG_0, SK_DROP),
 	};
+
+	/* for (size_t i = 0; i < array_len(instructions); i++) { */
+	/* 	if ((instructions[i].code & BPF_JMP) && !(instructions[i].code & BPF_CALL)) { */
+	/* 		instructions[i].off = array_len(instructions) - i - 1; */
+	/* 		printf("fixing instruction [%lu]\n", i); */
+	/* 	} */
+	/* } */
+
+#define FIX_JMP_OFF(IDX) instructions[IDX].off = array_len(instructions) - IDX - 1;
+	FIX_JMP_OFF(7);
+	FIX_JMP_OFF(8);
+	FIX_JMP_OFF(9);
 
 	if (bpf_program_add_instructions(prog, instructions,
 					 array_len(instructions)) < 0)
@@ -134,6 +160,15 @@ int main(int argc, char **argv)
 
 	prog = bpf_program_new(BPF_PROG_TYPE_CGROUP_SKB);
 
+	struct bpf_insn pre_insn[] = {
+		BPF_LDX_MEM(BPF_W, BPF_REG_6, BPF_REG_1, offsetof(struct __sk_buff, local_ip4)),
+		BPF_LDX_MEM(BPF_W, BPF_REG_7, BPF_REG_1, offsetof(struct __sk_buff, local_port)),
+		BPF_LDX_MEM(BPF_W, BPF_REG_8, BPF_REG_1, offsetof(struct __sk_buff, remote_ip4)),
+		BPF_LDX_MEM(BPF_W, BPF_REG_9, BPF_REG_1, offsetof(struct __sk_buff, remote_port)),
+	};
+	if (bpf_program_add_instructions(prog, pre_insn, array_len(pre_insn)) < 0)
+		errx(EXIT_FAILURE, "failed to add pre-instructions");
+
 	switch (opts.action) {
 	case BLOCK:
 		if (add_socket_block_instructions(prog, opts.source, opts.sport,
@@ -147,78 +182,29 @@ int main(int argc, char **argv)
 		errx(EXIT_SUCCESS, "accepting the socket");
 	};
 
+	struct bpf_insn post_insn[] = {
+		BPF_EXIT_INSN(),
+	};
+	if (bpf_program_add_instructions(prog, post_insn, array_len(post_insn)) < 0)
+		errx(EXIT_FAILURE, "failed to add post-instructions");
+
 	if (bpf_program_load(prog) < 0)
 		errx(EXIT_FAILURE, "bpf_program_load");
 
-	if (bpf_program_cgroup_attach(prog, BPF_CGROUP_INET_INGRESS, "/", 0) < 0)
+	if (bpf_program_cgroup_attach(prog, BPF_CGROUP_INET_INGRESS,
+				      "/sys/fs/cgroup/unified/user.slice/",
+				      0) < 0)
 		errx(EXIT_FAILURE, "bpf_program_cgroup_attach");
 
-	struct bpf_insn instructions[] = {
-		// get the comm
-		BPF_MOV64_REG(BPF_REG_1, BPF_REG_10),
-		BPF_ALU64_IMM(BPF_ADD, BPF_REG_1, -40),
+	signal(SIGINT, sigint_handler);
 
-		BPF_MOV64_IMM(BPF_REG_2, 30),
-		BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0,
-			     BPF_FUNC_get_current_comm),
+	while (!stop)
+		read_trace_pipe();
 
-		// build the fmt "%s\n" in [r1]
-		BPF_MOV64_REG(BPF_REG_1, BPF_REG_10),
-		BPF_ALU64_IMM(BPF_ADD, BPF_REG_1, -8),
+	bpf_program_cgroup_detach(prog);
+	bpf_program_destroy(prog);
 
-		BPF_ST_MEM(32, BPF_REG_10, -8, 0x22732522),
-		BPF_ST_MEM(32, BPF_REG_10, -4, 0x00000000),
+	warnx("Detached and destroyed eBPF firewall.");
 
-		// set fmt_len in r2
-		BPF_MOV64_IMM(BPF_REG_2, 5),
-		//
-		// put the comm in r3
-		BPF_MOV64_REG(BPF_REG_3, BPF_REG_10),
-		BPF_ALU64_IMM(BPF_ADD, BPF_REG_3, -40),
-
-		BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0,
-			     BPF_FUNC_trace_printk),
-
-		BPF_MOV64_IMM(BPF_REG_0, 0),
-		BPF_EXIT_INSN(),
-	};
-
-	char logbuf[1 << 20] = { 0 };
-
-	union bpf_attr attr;
-	memset(&attr, 0, sizeof(attr));
-
-	attr.prog_type = BPF_PROG_TYPE_TRACEPOINT;
-	attr.insns = ptr_to_u64(instructions);
-	attr.insn_cnt = array_len(instructions);
-	attr.license = ptr_to_u64("GPL");
-	attr.log_buf = ptr_to_u64(logbuf);
-	attr.log_size = sizeof(logbuf);
-	attr.log_level = 2;
-
-	int prog_fd = bpf(BPF_PROG_LOAD, &attr, sizeof(attr));
-	if (prog_fd < 0)
-		err(1, "bpf\n%s\n", logbuf);
-
-	struct perf_event_attr perf_attr;
-	memset(&perf_attr, 0, sizeof(perf_attr));
-
-	perf_attr.type = PERF_TYPE_TRACEPOINT;
-	perf_attr.size = sizeof(perf_attr);
-	perf_attr.config =
-		699; /* /sys/kernel/debug/tracing/events/syscalls/sys_enter_execve/id */
-	perf_attr.sample_period = 1;
-	perf_attr.wakeup_events = 1;
-
-	int perf_fd =
-		perf_event_open(&perf_attr, -1, 0, -1, PERF_FLAG_FD_CLOEXEC);
-	if (perf_fd < 0)
-		err(1, "perf_event_open");
-
-	ioctl(perf_fd, PERF_EVENT_IOC_SET_BPF, prog_fd);
-	ioctl(perf_fd, PERF_EVENT_IOC_ENABLE, 0);
-
-	puts(logbuf);
-	for (;;)
-		; /* read_trace_pipe(); */
+	return 0;
 }
